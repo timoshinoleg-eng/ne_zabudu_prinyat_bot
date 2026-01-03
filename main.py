@@ -68,6 +68,7 @@ class Config:
     # Features
     ENABLE_AI_FEATURES = os.getenv("ENABLE_AI_FEATURES", "true").lower() == "true"
     ENABLE_MORNING_MOTIVATION = os.getenv("ENABLE_MORNING_MOTIVATION", "true").lower() == "true"
+    USE_POLLING = os.getenv("USE_POLLING", "false").lower() == "true"
     
     # Rate Limits
     AI_DAILY_LIMIT_ASK = int(os.getenv("AI_DAILY_LIMIT_ASK", "5"))
@@ -1515,7 +1516,10 @@ async def send_morning_motivation():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifecycle events"""
-    global bot, redis_client
+    global bot, redis_client, dp
+    
+    # Переменная для polling task
+    polling_task = None
     
     # Startup
     logger.info("🚀 Запуск Medicine Bot v3.0...")
@@ -1570,16 +1574,51 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     logger.info("⏰ Планировщик запущен")
     
-    # Установка webhook
-    webhook_url = f"https://bot-{config.BOT_TOKEN.split(':')[0]}.bothost.ru/webhook"
-    await bot.set_webhook(url=webhook_url, drop_pending_updates=True)
-    logger.info(f"✅ Webhook установлен: {webhook_url}")
+    # Выбор режима работы: polling или webhook
+    
+    if config.USE_POLLING:
+        # Отключаем webhook и запускаем polling
+        await bot.delete_webhook(drop_pending_updates=True)
+        logger.info("✅ Webhook отключен, запускаю polling (обход SSL)...")
+        polling_task = asyncio.create_task(
+            dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        )
+    else:
+        # Webhook режим
+        webhook_url = f"https://bot-{config.BOT_TOKEN.split(':')[0]}.bothost.ru/webhook"
+        try:
+            await bot.delete_webhook(drop_pending_updates=True)
+            await bot.set_webhook(
+                url=webhook_url,
+                allowed_updates=dp.resolve_used_update_types(),
+                drop_pending_updates=True
+            )
+            logger.info(f"✅ Webhook установлен: {webhook_url}")
+            
+            # Проверка статуса webhook
+            webhook_info = await bot.get_webhook_info()
+            if webhook_info.last_error_message:
+                logger.warning(f"⚠️ Ошибка webhook: {webhook_info.last_error_message}")
+            if webhook_info.pending_update_count > 0:
+                logger.warning(f"⚠️ Накоплено обновлений: {webhook_info.pending_update_count}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка установки webhook: {e}")
     
     yield
     
     # Shutdown
     logger.info("⛔ Остановка бота...")
     scheduler.shutdown()
+    
+    # Отменяем polling task, если он запущен
+    if polling_task:
+        polling_task.cancel()
+        try:
+            await polling_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("✅ Polling остановлен")
+    
     await bot.session.close()
     if redis_client:
         await redis_client.close()
@@ -1590,11 +1629,34 @@ app = FastAPI(lifespan=lifespan, title="Medicine Bot with AI")
 @app.post("/webhook")
 async def webhook(request: Request) -> Response:
     """Webhook endpoint для Telegram"""
-    update_dict = await request.json()
-    from aiogram.types import Update
-    update = Update(**update_dict)
-    await dp.feed_update(bot, update)
-    return Response(status_code=200)
+    try:
+        update_dict = await request.json()
+        from aiogram.types import Update
+        update = Update(**update_dict)
+        await dp.feed_update(bot, update)
+        return Response(status_code=200)
+    except Exception as e:
+        logger.error(f"❌ Ошибка обработки webhook: {e}")
+        return Response(status_code=200)  # Всегда возвращаем 200, чтобы Telegram не повторял запрос
+
+@app.get("/webhook-status")
+async def webhook_status():
+    """Проверка статуса webhook для диагностики"""
+    try:
+        webhook_info = await bot.get_webhook_info()
+        return {
+            "url": webhook_info.url,
+            "has_custom_certificate": webhook_info.has_custom_certificate,
+            "pending_update_count": webhook_info.pending_update_count,
+            "last_error_date": webhook_info.last_error_date.isoformat() if webhook_info.last_error_date else None,
+            "last_error_message": webhook_info.last_error_message,
+            "max_connections": webhook_info.max_connections,
+            "allowed_updates": webhook_info.allowed_updates,
+            "status": "ok" if webhook_info.pending_update_count == 0 and not webhook_info.last_error_message else "warning"
+        }
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения статуса webhook: {e}")
+        return {"status": "error", "message": str(e)}
 
 @app.get("/health")
 async def health():
