@@ -1,11 +1,3 @@
-"""
-Telegram Bot для напоминаний о приёме лекарств с AI-ассистентом
-Version: 3.0 (FastAPI + AI Integration)
-Platform: Bothost.ru
-"""
-
-
-
 from dotenv import load_dotenv
 import os
 import logging
