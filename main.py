@@ -50,7 +50,7 @@ class Config:
     
     # OpenRouter AI
     OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-    AI_TEXT_MODEL = "deepseek/deepseek-r1:free"
+    AI_TEXT_MODEL = os.getenv("AI_TEXT_MODEL", "qwen/qwen-2.5-72b-instruct:free")
     AI_IMAGE_MODEL = None  # Нет бесплатных моделей для генерации изображений
     
     # Redis
@@ -168,12 +168,13 @@ class MedicineDB:
         
         # Если старый формат (без user_info) - создаём новый
         if "user_info" not in self.data[user_key]:
+            tz = pytz.timezone(config.TIMEZONE)
             return {
                 "user_id": user_id,
                 "name": None,
                 "age": None,
                 "onboarding_completed": False,
-                "created_at": datetime.now().isoformat(),
+                "created_at": datetime.now(tz).isoformat(),
                 "medications": self.data[user_key]
             }
         
@@ -197,7 +198,7 @@ class MedicineDB:
                 "name": name,
                 "age": age,
                 "onboarding_completed": True,
-                "created_at": datetime.now().isoformat(),
+                "created_at": datetime.now(pytz.timezone(config.TIMEZONE)).isoformat(),
                 "streak": 0,
                 "achievements": []
             },
@@ -224,10 +225,11 @@ class MedicineDB:
         if "medications" not in self.data[user_key]:
             self.data[user_key]["medications"] = {}
         
+        tz = pytz.timezone(config.TIMEZONE)
         med_data = {
             'times': times,
             'frequency': frequency,
-            'added_at': datetime.now().isoformat(),
+            'added_at': datetime.now(tz).isoformat(),
             'history': {}
         }
         
@@ -285,7 +287,8 @@ class MedicineDB:
         if med_name not in medications:
             return False
         
-        today = datetime.now().strftime("%Y-%m-%d")
+        tz = pytz.timezone(config.TIMEZONE)
+        today = datetime.now(tz).strftime("%Y-%m-%d")
         
         if today not in medications[med_name]['history']:
             medications[med_name]['history'][today] = {}
@@ -302,6 +305,7 @@ class MedicineDB:
         if not medications:
             return "❌ Нет зарегистрированных препаратов"
         
+        tz = pytz.timezone(config.TIMEZONE)
         report_lines = ["📊 ОТЧЁТ ЗА НЕДЕЛЮ\n"]
         
         for med_name, med_data in medications.items():
@@ -310,8 +314,9 @@ class MedicineDB:
             taken_count = 0
             
             for i in range(7):
-                date_str = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
-                day_abbr = WEEKDAY_MAP[(datetime.now() - timedelta(days=i)).weekday()]
+                now = datetime.now(tz)
+                date_str = (now - timedelta(days=i)).strftime("%Y-%m-%d")
+                day_abbr = WEEKDAY_MAP[(now - timedelta(days=i)).weekday()]
                 
                 if date_str in med_data.get('history', {}):
                     day_taken = sum(1 for v in med_data['history'][date_str].values() if v)
@@ -335,7 +340,8 @@ class MedicineDB:
         """Получить список пропущенных напоминаний"""
         medications = self.get_medications(user_id)
         missed = []
-        now = datetime.now()
+        tz = pytz.timezone(config.TIMEZONE)
+        now = datetime.now(tz)
         today = now.strftime("%Y-%m-%d")
         
         for med_name, med_data in medications.items():
@@ -614,7 +620,8 @@ def should_remind_today(frequency: str, current_day: str) -> bool:
         return True
     
     if "через день" in freq_lower or "alt" in freq_lower:
-        return datetime.now().day % 2 == 0
+        tz = pytz.timezone(config.TIMEZONE)
+        return datetime.now(tz).day % 2 == 0
     
     if current_day in freq_lower:
         return True
@@ -1132,7 +1139,8 @@ async def handle_taken_button(message: Message):
     """Обработка кнопки 'ПРИНЯЛ'"""
     text = message.text
     med_name = text.replace("✅ ПРИНЯЛ ", "").strip()
-    current_time = datetime.now().strftime("%H:%M")
+    tz = pytz.timezone(config.TIMEZONE)
+    current_time = datetime.now(tz).strftime("%H:%M")
     
     success = db.mark_taken(message.from_user.id, med_name, current_time)
     
