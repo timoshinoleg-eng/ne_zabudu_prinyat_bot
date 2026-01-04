@@ -12,6 +12,7 @@ import logging
 import asyncio
 import json
 import re
+import pytz
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, date
 from typing import Dict, List, Optional, Tuple, Set
@@ -57,8 +58,8 @@ class Config:
     
     # OpenRouter AI
     OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-    AI_TEXT_MODEL = "qwen/qwen-3-coder-480b-instruct:free"
-    AI_IMAGE_MODEL = "google/gemini-2.5-flash-image-preview:free"
+    AI_TEXT_MODEL = "deepseek/deepseek-r1:free"
+    AI_IMAGE_MODEL = None  # Нет бесплатных моделей для генерации изображений
     
     # Redis
     REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
@@ -404,7 +405,9 @@ class OpenRouterClient:
         payload = {
             "model": model or config.AI_TEXT_MODEL,
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": max_tokens
+            "max_tokens": max_tokens,
+            "temperature": 0.7,
+            "top_p": 0.9
         }
         
         if response_format:
@@ -432,6 +435,11 @@ class OpenRouterClient:
         """Генерация изображения"""
         if not self.api_key:
             raise ValueError("OpenRouter API key not configured")
+        
+        # Проверка доступности модели для генерации изображений
+        if not config.AI_IMAGE_MODEL:
+            logger.warning("❌ Генерация изображений недоступна (нет бесплатных моделей на OpenRouter)")
+            raise ValueError("Image generation not available on free plan")
         
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -1362,7 +1370,9 @@ async def send_reminders():
         logger.debug("📭 Нет пользователей")
         return
     
-    now = datetime.now()
+    # Получаем время с учётом TIMEZONE из config
+    tz = pytz.timezone(config.TIMEZONE)
+    now = datetime.now(tz)
     current_time = now.strftime("%H:%M")
     current_day = WEEKDAY_MAP[now.weekday()]
     today = now.strftime("%Y-%m-%d")
@@ -1415,6 +1425,7 @@ async def send_reminders():
 async def send_weekly_report():
     """Еженедельный отчёт"""
     db.reload()
+    tz = pytz.timezone(config.TIMEZONE)
     
     for user_id_str in db.data.keys():
         user_id = int(user_id_str)
@@ -1429,6 +1440,7 @@ async def send_weekly_report():
 async def send_sos_alerts():
     """SOS-уведомления о пропущенных приёмах"""
     db.reload()
+    tz = pytz.timezone(config.TIMEZONE)
     
     for user_id_str in db.data.keys():
         user_id = int(user_id_str)
@@ -1438,7 +1450,8 @@ async def send_sos_alerts():
             continue
         
         for med_name, reminder_time, reminder_dt in missed:
-            hours_passed = int((datetime.now() - reminder_dt).total_seconds() / 3600)
+            now = datetime.now(tz)
+            hours_passed = int((now - reminder_dt).total_seconds() / 3600)
             
             text = f"""🚨 SOS! ПРОПУЩЕН ПРИЁМ!
 
@@ -1456,12 +1469,13 @@ async def send_sos_alerts():
                     reply_markup=get_taken_button(med_name)
                 )
                 
+                now = datetime.now(tz)
                 await bot.send_message(
                     config.MANAGER_ID,
                     f"🚨 SOS!\n\n"
                     f"Пропущен: {med_name} ({reminder_time})\n"
                     f"👤 User: {user_id}\n"
-                    f"⏰ {datetime.now().strftime('%d.%m %H:%M')}"
+                    f"⏰ {now.strftime('%d.%m %H:%M')}"
                 )
                 
                 logger.warning(f"🚨 SOS {med_name} → user {user_id}")
@@ -1474,6 +1488,7 @@ async def send_morning_motivation():
         return
     
     db.reload()
+    tz = pytz.timezone(config.TIMEZONE)
     users = db.get_all_users()
     
     for user in users:
@@ -1490,9 +1505,10 @@ async def send_morning_motivation():
             total = 0
             taken = 0
             
+            now = datetime.now(tz)
             for med_data in medications.values():
                 for i in range(7):
-                    date_str = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
+                    date_str = (now - timedelta(days=i)).strftime("%Y-%m-%d")
                     if date_str in med_data.get('history', {}):
                         day_taken = sum(1 for v in med_data['history'][date_str].values() if v)
                         day_total = len(med_data['history'][date_str])
